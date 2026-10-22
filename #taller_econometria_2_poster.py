@@ -1,0 +1,101 @@
+#taller_econometria_2_poster
+# %% Importación de paquetes ============================
+
+# Trabajar con rutas relativas en python 
+from pathlib import Path
+
+# Módulos de numpy, pandas, matplotlib y scipy
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import jarque_bera, probplot
+
+# Módulos de statsmodels
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.stattools import adfuller, kpss
+
+# %% Cargar bases de datos en python usando rutas relativas =========================
+
+# Obtener la ruta del directorio raíz
+BASE_DIR = Path(__file__).resolve().parent
+
+DATA_DIR = BASE_DIR
+
+# Rutas de las bases de datos 
+ruta_exp = DATA_DIR / "LORSGPORUSQ659S.csv" # Base de datos de exportaciones
+
+# %% =========================
+# PRIMERA SERIE: GDP US
+# ============================
+
+# Base de datos con la serie importada a python
+expo_base = pd.read_csv(
+    ruta_exp,
+)
+
+#ver el tipo de objeto de la base de datos (Pandaas.DataFrame)
+print(type(expo_base))
+
+#ver las primeras y últimas observaciones de la base de datos
+print(expo_base.head()) #primeras 5 observaciones
+print(expo_base.tail()) #segundas 5 observaciones
+
+# %% Creación de la serie de tiempo de "exportaciones"
+
+# La nueva serie de tiempo se va a llamar "expo_serie" y va a tener valores numéricos
+expo_serie = expo_base["LORSGPORUSQ659S"].copy()
+expo_serie = pd.to_numeric(expo_serie, errors="coerce")
+expo_serie = expo_serie.dropna() # Borrar missing values
+
+# Ver el principio y final de la serie de tiempo
+print(expo_serie.head())
+print(expo_serie.tail())
+
+# # El tipo de objeto de la base de datos ahora es un Pandas.Series
+print(type(expo_serie))
+
+# Ver algunas estadísticas descriptivas de la serie de tiempo 
+print(expo_serie.describe())
+
+# %% =========================
+# Paso 1: Identificación
+# ============================
+
+# Gráfica de la serie de tiempo "exportaciones tradicionales"
+plt.figure(figsize=(10, 5))
+plt.plot(expo_serie)
+plt.title("GDP US, 1948-2023")
+plt.xlabel("Tiempo")
+plt.ylabel("GDP US (% cambio trimestral)")
+plt.grid(True)
+plt.show()
+
+# %% FAC y FACP de la serie original
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+plot_acf(
+    expo_serie,
+    lags=24,
+    alpha=0.05,
+    bartlett_confint=False,
+    ax=axes[0]
+)
+
+axes[0].set_title("FAC GDP US")
+
+plot_pacf(
+    expo_serie,
+    lags=24,
+    alpha=0.05,
+    ax=axes[1]
+)
+
+axes[1].set_title("FACP de la serie original")
+
+plt.tight_layout()
+plt.show()
+
+# %%
