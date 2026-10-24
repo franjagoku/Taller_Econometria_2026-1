@@ -36,33 +36,33 @@ ruta_exp = DATA_DIR / "LORSGPORUSQ659S.csv" # Base de datos de exportaciones
 # ============================
 
 # Base de datos con la serie importada a python
-expo_base = pd.read_csv(
+GDP_US_base = pd.read_csv(
     ruta_exp,
 )
 
 #ver el tipo de objeto de la base de datos (Pandaas.DataFrame)
-print(type(expo_base))
+print(type(GDP_US_base))
 
 #ver las primeras y últimas observaciones de la base de datos
-print(expo_base.head()) #primeras 5 observaciones
-print(expo_base.tail()) #segundas 5 observaciones
+print(GDP_US_base.head()) #primeras 5 observaciones
+print(GDP_US_base.tail()) #segundas 5 observaciones
 
 # %% Creación de la serie de tiempo de "GDP US"
 
-# La nueva serie de tiempo se va a llamar "expo_serie" y va a tener valores numéricos
-expo_serie = expo_base["LORSGPORUSQ659S"].copy()
-expo_serie = pd.to_numeric(expo_serie, errors="coerce")
-expo_serie = expo_serie.dropna() # Borrar missing values
+# La nueva serie de tiempo se va a llamar "GDP_US_serie" y va a tener valores numéricos
+GDP_US_serie = GDP_US_base["LORSGPORUSQ659S"].copy()
+GDP_US_serie = pd.to_numeric(GDP_US_serie, errors="coerce")
+GDP_US_serie = GDP_US_serie.dropna() # Borrar missing values
 
 # Ver el principio y final de la serie de tiempo
-print(expo_serie.head())
-print(expo_serie.tail())
+print(GDP_US_serie.head())
+print(GDP_US_serie.tail())
 
 # # El tipo de objeto de la base de datos ahora es un Pandas.Series
-print(type(expo_serie))
+print(type(GDP_US_serie))
 
 # Ver algunas estadísticas descriptivas de la serie de tiempo 
-print(expo_serie.describe())
+print(GDP_US_serie.describe())
 
 # %% =========================
 # Paso 1: Identificación
@@ -70,7 +70,7 @@ print(expo_serie.describe())
 
 # Gráfica de la serie de tiempo "GDP US"
 plt.figure(figsize=(10, 5))
-plt.plot(expo_serie)
+plt.plot(GDP_US_serie)
 plt.title("GDP US, 1948-2023")
 plt.xlabel("Tiempo")
 plt.ylabel("GDP US (% cambio trimestral)")
@@ -82,7 +82,7 @@ plt.show()
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 plot_acf(
-    expo_serie,
+    GDP_US_serie,
     lags=50,
     alpha=0.05,
     bartlett_confint=False,
@@ -92,7 +92,7 @@ plot_acf(
 axes[0].set_title("FAC GDP US")
 
 plot_pacf(
-    expo_serie,
+    GDP_US_serie,
     lags=50,
     alpha=0.05,
     ax=axes[1]
@@ -106,7 +106,7 @@ plt.show()
 # %% Tests de Raíz Unitaria 
 
 # Test de Augmented Dickey Fuller (ADF)
-adf_result = adfuller(expo_serie, regression="c", autolag="BIC") # Test de Dickey Fuller con intercepto y tendencia determínistica
+adf_result = adfuller(GDP_US_serie, regression="c", autolag="BIC") # Test de Dickey Fuller con intercepto y tendencia determínistica
 
 # Nota: En el test de ADF si no rechazo la H0 la serie no es estacionaria
 #       y si rechazo la H0 la serie es estacionaria. 
@@ -126,7 +126,7 @@ else:
     print("ADF: No rechazamos H0. Según el test, la serie no es estacionaria.")
 
 # Test KPSS
-kpss_result = kpss(expo_serie, regression="c", nlags="auto") #test KPSS con intercepto y tendencia determinística
+kpss_result = kpss(GDP_US_serie, regression="c", nlags="auto") #test KPSS con intercepto y tendencia determinística
 
 # Nota: En prueba KPSS se interpreta al contario que una prueba ADF.
 #       Si no rechazo la H0 la serie es estacionaria
@@ -160,9 +160,7 @@ resultados, modelos = [], {}
 for p, q, P, Q in itertools.product(p_rng, q_rng, P_rng, Q_rng):
     orden, est = (p, d, q), (P, D, Q, s)
     try:
-        m = SARIMAX(expo_serie, order=orden, seasonal_order=est,
-                    enforce_stationarity=False,
-                    enforce_invertibility=False).fit(disp=False)
+        m = SARIMAX(GDP_US_serie, order=orden, seasonal_order=est, trend="c").fit(disp=False)
         modelos[(orden, est)] = m
         resultados.append({"orden": orden, "estacional": est,
                            "AIC": m.aic, "BIC": m.bic})
@@ -201,13 +199,32 @@ for _, r in tabla.head(5).iterrows():      # cambia 5 por los que quieras
 
 comparacion = pd.DataFrame(filas)
 
-cols_p = [c for c in comparacion.columns if "_p" in c]
+cols_p = [c for c in comparacion.columns if c.endswith(")") or c == "JB_p"]
+cols_p = [c for c in cols_p if "_p" in c]
 
-formato = {c: "{:.4f}".format for c in cols_p}
+formato = {c: "{:.3f}".format for c in cols_p}
 formato.update({"AIC": "{:.2f}".format, "BIC": "{:.2f}".format,
                 "Asimetría": "{:.3f}".format, "Curtosis": "{:.3f}".format})
 
 comparacion.style.format(formato)
 
-comparacion.drop(columns=["Asimetría", "Curtosis"]).style.format(formato)
+for criterio in ["AIC", "BIC"]:
+    print(f"\nTop 5 por {criterio}")
+    top = tabla.sort_values(criterio).head(5)
+    filas = []
+    for _, r in top.iterrows():
+        clave = (r["orden"], r["estacional"])
+        filas.append({**r.to_dict(), **diagnosticos(modelos[clave], *clave)})
+    print(pd.DataFrame(filas).to_string(formatters=formato))
+
 # %%
+# %% Creación de la serie de tiempo de "GDP US"
+col_fecha = expo_base.columns[0]            # "observation_date" o "DATE"
+expo_base[col_fecha] = pd.to_datetime(expo_base[col_fecha])
+
+expo_serie = pd.to_numeric(
+    expo_base.set_index(col_fecha)["LORSGPORUSQ659S"], errors="coerce"
+).dropna().asfreq("QS")
+
+print(expo_serie.isna().sum())              # debe ser 0 (sin trimestres faltantes)
+print(expo_serie.head())
