@@ -8,13 +8,12 @@
 
 # %% Importación de paquetes ============================================================
 
-import itertools, warnings
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
 from scipy.stats import jarque_bera, probplot
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_ljungbox, breaks_cusumolsresid, het_arch
@@ -22,9 +21,6 @@ from statsmodels.tools.sm_exceptions import ConvergenceWarning, InterpolationWar
 from statsmodels.tsa.arima_process import arma2ma
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller, kpss
-
-import statsmodels.stats.stattools as smt
-
 
 # ruptures NO es parte de las librerías básicas: la sección de quiebres es opcional
 try:
@@ -40,7 +36,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)         # aviso de het
 
 # %% Parámetros del análisis (lo único que normalmente hay que tocar) ====================
 
-N_OBS          = 200                       # tamaño de muestra pedido
+N_OBS          = 100                       # tamaño de muestra pedido
 FIN_MUESTRA    = "2023-09-30"              # último dato disponible (2023 Q3)
 VENTANA_COVID  = ("2020-03-31", "2022-03-31")  # 2020 Q1 – 2022 Q1 (9 trimestres)
 UMBRAL_OUTLIER = 3.5                       # |residuo estandarizado| que dispara una dummy adicional
@@ -328,249 +324,104 @@ exog = crear_dummies(serie.index, sorted(fechas_dummy))
 print(f"\nDummies finales ({exog.shape[1]}): {list(exog.columns)}")
 print(f"Observaciones efectivas: {len(serie) - exog.shape[1]} de {len(serie)}")
 
-# %% PASO 2: ESTIMACIÓN DE MODELOS SARIMA CON DUMMIES
+# %% =====================================================================================
+# PASO 2: ESTIMACIÓN
+# ========================================================================================
+# Modelos candidatos (con la serie ya tratada):
+#   AR(1)  : base
+#   AR(2), AR(3), AR(5), AR(6): picos de la FACP en rezagos bajos / 5
+#   ARMA(1,1), ARMA(2,1), ARMA(2,2): alternativas mixtas
+#   AR(8)  : REFERENCIA — el modelo que salió en Colab; se estima para compararlo con justicia
+# Nota: SARIMAX maximiza la verosimilitud EXACTA (filtro de Kalman); las notas de clase desarrollan
+# la verosimilitud CONDICIONAL. Son asintóticamente equivalentes; difieren un poco en muestras chicas.
 
-warnings.filterwarnings("ignore")
-
-s = 4
-d, D = 0, 0
-
-p_rng = q_rng = range(0, 5)
-P_rng = Q_rng = range(0, 2)
-
-resultados, modelos = [], {}
-
-# Verificar que las dummies correspondan a las observaciones de la serie
-exog = exog.reindex(serie.index).fillna(0)
-
-print(f"Número de dummies incluidas: {exog.shape[1]}")
-print("Dummies:", list(exog.columns))
-
-for p, q, P, Q in itertools.product(
-    p_rng, q_rng, P_rng, Q_rng
-):
-    orden = (p, d, q)
-    est = (P, D, Q, s)
-
-    try:
-        m = SARIMAX(
-            serie,
-            exog=exog,  # Incluir las dummies como variables exógenas
-            order=orden,
-            seasonal_order=est,
-            trend="c",
-            enforce_stationarity=False,
-            enforce_invertibility=False
-    ).fit(disp=False)
-
-
-        clave = (orden, est)
-        modelos[clave] = m
-
-        resultados.append({
-            "orden": orden,
-            "estacional": est,
-            "AIC": m.aic,
-            "BIC": m.bic
-        })
-
-    except Exception as e:
-        print(f"Falló {orden} x {est}: {e}")
-
-tabla = (
-    pd.DataFrame(resultados)
-    .sort_values("BIC")
-    .reset_index(drop=True)
-)
-
-# %% PASO 3: SELECCIÓN DE LOS 10 MEJORES MODELOS POR BIC
-
-TOP_N = 10
-
-# Los modelos ya fueron estimados en el Paso 2 para poder calcular el BIC.
-top10 = tabla.nsmallest(TOP_N, "AIC").copy()
-
-print("\n=== Top 10 modelos según AIC ===")
-print(top10.to_string(index=False))
-
-# %% PASO 5: PRUEBAS DE DIAGNÓSTICO DE LOS 10 MODELOS
-def diagnosticos(modelo, orden, est, lags=(8, 12, 16), arch_lags=(4, 8, 12)):
-    k = orden[1] + est[1] * est[3]
-    resid = modelo.resid.iloc[max(k, 1):]
-
-    gl = orden[0] + orden[2] + est[0] + est[2]
-    lb = acorr_ljungbox(resid, lags=list(lags), model_df=gl, return_df=True)
-    jb = smt.jarque_bera(resid)
-
-    salida = {
-        "LB_p(8)": lb["lb_pvalue"].iloc[0],
-        "LB_p(12)": lb["lb_pvalue"].iloc[1],
-        "LB_p(16)": lb["lb_pvalue"].iloc[2],
-        "JB_p": jb[1],
-        "Asimetría": stats.skew(resid),
-        "Curtosis": stats.kurtosis(resid, fisher=False),
-    }
-    for n in arch_lags:
-        salida[f"ARCH_p({n})"] = het_arch(resid, nlags=n)[1]
-    return salida
+ORDENES = [(1, d, 0), (2, d, 0), (3, d, 0), (4, d, 0), (5, d, 0), (6, d, 0), (8, d, 0),
+           (1, d, 1), (2, d, 1), (2, d, 2)]
+estimaciones = {}
+for orden in ORDENES:
+    nombre = nombre_modelo(orden)
+    estimaciones[nombre] = ajustar(serie, orden, exog)
+    print(f"  estimado {nombre}")
 
 filas = []
-
-for i, (_, r) in enumerate(top10.iterrows(), start=1):
-    clave = (r["orden"], r["estacional"])
-    modelo = modelos[clave]
-
-    diag = diagnosticos(modelo, *clave)
-
+for nombre, r in estimaciones.items():
+    p, _, q = r.model.order
+    ar_names = [k for k in r.params.index if k.startswith("ar.L")]
+    ar_ar, ar_ma = min_raices(r)
     filas.append({
-        "Ranking BIC": i,
-        "orden": clave[0],
-        "estacional": clave[1],
-        "AIC": modelo.aic,
-        "BIC": modelo.bic,
-        **diag
+        "Modelo": nombre, "AIC": r.aic, "BIC": r.bic,
+        "mín|raíz AR|": ar_ar, "mín|raíz MA|": ar_ma,
+        "AR signif. 5%": f"{int((r.pvalues[ar_names] < 0.05).sum())}/{p}" if p else "—",
+        "μ̂ (media incond.)": media_incondicional(r),
     })
+tabla_est = pd.DataFrame(filas)
+print("\n=== Resumen de estimaciones (todas con las mismas dummies) ===")
+print(tabla_est.round(3).to_string(index=False))
 
-comparacion = pd.DataFrame(filas)
+# %% =====================================================================================
+# PASO 3: VALIDACIÓN DE SUPUESTOS
+# ========================================================================================
+# Ljung-Box: H0 = sin autocorrelación; estadístico Q(h) = T(T+2) Σ ρ̂_k²/(T−k) ~ χ²(h − p − q).
+# Solo se calcula para h > p + q (en Colab, LB(5) y LB(10) para un AR(8) tenían gl ≤ 0).
+# JB: H0 normalidad.  ARCH(m): H0 = no hay heterocedasticidad condicional.
 
-print("\n=== Diagnósticos de los 10 mejores modelos ===")
+tabla_diag = pd.DataFrame([diagnostico(r, exog, n) for n, r in estimaciones.items()])
+print("\n=== Diagnóstico de residuos (p-valores; > 0.05 = supuesto se cumple; — = no aplicable) ===")
+print(tabla_diag.round(3).to_string(index=False, na_rep="—"))
 
-cols_p = [
-    c for c in comparacion.columns
-    if c.endswith(")") or c == "JB_p"
-]
-cols_p = [c for c in cols_p if "_p" in c]
+resumen = tabla_est.merge(tabla_diag, on="Modelo")
+lb_cols = [f"LB({h})" for h in LAGS_LB]
+resumen["LB_ok"] = resumen[lb_cols].apply(lambda f: bool((f.dropna() > 0.05).all()), axis=1)
+resumen["válido"] = (resumen["mín|raíz AR|"] > 1.01) & (resumen["mín|raíz MA|"] > 1.01) & resumen["LB_ok"]
 
-formato = {c: "{:.3f}".format for c in cols_p}
-formato.update({
-    "AIC": "{:.2f}".format,
-    "BIC": "{:.2f}".format,
-    "Asimetría": "{:.3f}".format,
-    "Curtosis": "{:.3f}".format
-})
+# %% Selección del modelo final
 
-print(comparacion.to_string(index=False, formatters=formato))
+# Regla: entre los modelos estacionarios, invertibles y sin autocorrelación residual, el de menor
+# BIC (penaliza más la complejidad que el AIC; con T pequeño protege contra sobreajuste).
+# Si hay empate práctico (<2 puntos de BIC), se prefiere el de menos parámetros (parsimonia).
+validos = resumen[resumen["válido"]].copy()
+if validos.empty:
+    print("\n⚠ Ningún modelo pasa todos los filtros; se elige por BIC entre estacionarios/invertibles.")
+    validos = resumen[(resumen["mín|raíz AR|"] > 1.01) & (resumen["mín|raíz MA|"] > 1.01)].copy()
+validos["k_params"] = validos["Modelo"].map(lambda n: len(estimaciones[n].params))
+bic_min = validos["BIC"].min()
+cercanos = validos[validos["BIC"] <= bic_min + 2].sort_values(["k_params", "BIC"])
+nombre_regla = cercanos["Modelo"].iloc[0]
 
-# %% Selección del modelo final según Ljung-Box y BIC
+nombre_final = MODELO_FINAL or nombre_regla
+estimacion_final = estimaciones[nombre_final]
+print("\n=== Selección ===")
+print(resumen[["Modelo", "AIC", "BIC", "mín|raíz AR|", "mín|raíz MA|", "LB_ok", "válido"]].round(3).to_string(index=False))
+print(f"\nMejor AIC entre válidos : {validos.sort_values('AIC')['Modelo'].iloc[0]}")
+print(f"Mejor BIC entre válidos : {validos.sort_values('BIC')['Modelo'].iloc[0]}")
+print(f"Modelo elegido          : {nombre_final}" + ("  (regla)" if MODELO_FINAL is None else "  (manual)"))
 
-# Criterio Ljung-Box: no rechazar la ausencia de autocorrelación
-criterio_lb = (
-    (comparacion["LB_p(8)"] < 0.05) &
-    (comparacion["LB_p(12)"] < 0.05) &
-    (comparacion["LB_p(16)"] < 0.05)
-)
+print(f"\n=== Estimación explícita — {nombre_final} ===")
+coefs = pd.DataFrame({
+    "coef": estimacion_final.params, "error est.": estimacion_final.bse,
+    "z": estimacion_final.tvalues, "p-valor": estimacion_final.pvalues,
+    "signif. 5%": estimacion_final.pvalues < 0.05,
+}).round(4)
+print(coefs.to_string())
+print(f"μ̂ = a0/(1−Σa_i) = {media_incondicional(estimacion_final):.3f} %")
+print(f"σ̂² = {estimacion_final.params['sigma2']:.4f}")
+print("Raíces AR (módulo):", np.round(np.abs(estimacion_final.arroots), 3))
 
-comparacion["Cumple_LB"] = criterio_lb
+# %% Gráficas de diagnóstico: modelo final y AR(8) de referencia
 
-# Solo se consideran los modelos que cumplen Ljung-Box
-candidatos = comparacion.loc[
-    comparacion["Cumple_LB"]
-].sort_values("BIC")
+graficas_diagnostico(nombre_final, estimacion_final, exog, "03_diagnostico_modelo_final.png")
+if "AR(8)" in estimaciones and nombre_final != "AR(8)":
+    graficas_diagnostico("AR(8) (referencia Colab)", estimaciones["AR(8)"], exog, "03b_diagnostico_AR8.png")
 
-print("\n=== Modelos que cumplen Ljung-Box, ordenados por BIC ===")
-print(comparacion.to_string(index=False, formatters=formato))
-
-if not candidatos.empty:
-    # El modelo con menor BIC entre los que cumplen Ljung-Box
-    mejor = candidatos.iloc[0]
-
-    print("\n=== MODELO FINAL SELECCIONADO ===")
-    print(f"Orden: {mejor['orden']}")
-    print(f"Estacional: {mejor['estacional']}")
-    print(f"BIC: {mejor['BIC']:.3f}")
-
-    print("Ljung-Box:")
-    print(f"  p(8):  {mejor['LB_p(8)']:.4f}")
-    print(f"  p(12): {mejor['LB_p(12)']:.4f}")
-    print(f"  p(16): {mejor['LB_p(16)']:.4f}")
-
-    clave_final = (mejor["orden"], mejor["estacional"])
-    MODELO_FINAL = modelos[clave_final]
-
-else:
-    print(
-        "\nNinguno de los modelos cumple todos los criterios "
-        "de Ljung-Box. No se seleccionó un modelo final."
-    )
-    MODELO_FINAL = None
-
-# %% Estimación e impresión de parámetros del modelo seleccionado
-
-if MODELO_FINAL is None:
-    raise RuntimeError(
-        "No se seleccionó un modelo. Revisa los criterios de Ljung-Box."
-    )
-
-estimacion_final = MODELO_FINAL
-
-orden_final = estimacion_final.model.order
-estacional_final = estimacion_final.model.seasonal_order
-
-nombre_final = (
-    f"SARIMA{orden_final}x{estacional_final}"
-)
-
-print(print(f"\n=== MODELO FINAL: SARIMA{MODELO_FINAL.model.order} x {MODELO_FINAL.model.seasonal_order} ==="))
-print("Modelo:", nombre_final)
-print(f"AIC: {estimacion_final.aic:.3f}")
-print(f"BIC: {estimacion_final.bic:.3f}")
-
-# Tabla de parámetros estimados, incluidas las dummies
-tabla_est = pd.DataFrame({
-    "Coeficiente": estimacion_final.params,
-    "Error estándar": estimacion_final.bse,
-    "Estadístico z": estimacion_final.tvalues,
-    "p-valor": estimacion_final.pvalues,
-    "Significativo al 5%": estimacion_final.pvalues < 0.05
-})
-
-print(f"\n=== PARÁMETROS DEL MODELO  SARIMA{MODELO_FINAL.model.order} x {MODELO_FINAL.model.seasonal_order}===")
-print(tabla_est.round(4).to_string())
-
-# Tabla de diagnósticos de los modelos evaluados
-tabla_diag = comparacion.copy()
-
-# Guardar las tablas
-tabla_est.to_csv(
-    RESULTADOS_DIR / "tabla_estimaciones.csv"
-)
-tabla_diag.to_csv(
-    RESULTADOS_DIR / "tabla_diagnostico.csv",
-    index=False
-)
-
-
-# %% GRÁFICAS DE DIAGNÓSTICO DEL MODELO FINAL
-
-graficas_diagnostico(
-    nombre_final,
-    estimacion_final,
-    exog,
-    "03_diagnostico_modelo_final.png"
-)
-
-tabla_como_imagen(
-    tabla_diag.round(3).fillna("—"),
-    "Diagnóstico de residuos",
-    "04_tabla_diagnostico.png"
-)
-
-tabla_como_imagen(
-    tabla_est.round(3),
-    "Parámetros estimados del modelo final",
-    "04b_tabla_estimaciones.png"
-)
+tabla_como_imagen(tabla_diag.round(3).fillna("—"), "Diagnóstico de residuos (p-valores)", "04_tabla_diagnostico.png")
+tabla_como_imagen(tabla_est.round(3), "Resumen de estimaciones", "04b_tabla_estimaciones.png")
+tabla_est.to_csv(RESULTADOS_DIR / "tabla_estimaciones.csv", index=False)
+tabla_diag.to_csv(RESULTADOS_DIR / "tabla_diagnostico.csv", index=False)
 
 e_final = residuos_validos(estimacion_final, exog)
-
-jb_p = jarque_bera(e_final).pvalue
-print(f"\nNormalidad: JB p-valor = {jb_p:.4f}")
-print(
-    "No se rechaza normalidad al 5%."
-    if jb_p > 0.05
-    else "Se rechaza normalidad al 5%."
-)
-
+print(f"\nNormalidad (JB p = {jarque_bera(e_final).pvalue:.3f}): "
+      + ("se cumple" if jarque_bera(e_final).pvalue > 0.05
+         else "se rechaza → los intervalos de pronóstico se calculan también por bootstrap"))
 
 # %% =====================================================================================
 # ESTABILIDAD: OLS-CUSUM (y, opcional, quiebres en la media)
@@ -578,147 +429,170 @@ print(
 # OLS-CUSUM (Ploberger–Krämer): S_t = Σ_{i≤t} ê_i / (σ̂ √n). Bajo H0 de parámetros estables se
 # comporta como un puente browniano; se rechaza si sup|S_t| > 1.358 (5 %).
 
+n_e = len(e_final)
+S = np.cumsum(e_final.values) / (e_final.std(ddof=1) * np.sqrt(n_e))
+stat_cusum, p_cusum, _ = breaks_cusumolsresid(e_final.values, ddof=len(estimacion_final.params) - exog.shape[1])
+print(f"\nOLS-CUSUM: estadístico = {stat_cusum:.3f}, p-valor = {p_cusum:.3f} → "
+      + ("estable (no se rechaza H0)" if p_cusum > 0.05 else "posible inestabilidad"))
 
-# Obtener residuos del modelo final
-residuos = pd.Series(estimacion_final.resid).replace(
-    [np.inf, -np.inf], np.nan
-).dropna()
-
-# Estandarizar los residuos
-desv = residuos.std(ddof=1)
-
-if len(residuos) < 10 or not np.isfinite(desv) or desv == 0:
-    print("No hay suficientes residuos válidos para calcular el CUSUM.")
-else:
-    z = (residuos - residuos.mean()) / desv
-
-    # CUSUM centrado: puente acumulado
-    n = len(z)
-    cusum = z.cumsum()
-    cusum = cusum - (np.arange(1, n + 1) / n) * z.sum()
-
-    # Bandas aproximadas de referencia al 5 %
-    t = np.arange(1, n + 1) / n
-    limite = 1.358 * np.sqrt(n * t * (1 - t))
-
-    fig, ax = plt.subplots(figsize=(11, 5))
-
-    ax.plot(
-        residuos.index, cusum,
-        label="CUSUM de residuos estandarizados"
-    )
-    ax.plot(
-        residuos.index, limite,
-        linestyle="--", color="red",
-        label="Banda superior de referencia"
-    )
-    ax.plot(
-        residuos.index, -limite,
-        linestyle="--", color="red",
-        label="Banda inferior de referencia"
-    )
-    ax.axhline(0, color="black", linewidth=0.8)
-
-    ax.set_title(f"Diagnóstico CUSUM: {nombre_final}")
-    ax.set_xlabel("Tiempo")
-    ax.set_ylabel("Suma acumulada")
-    ax.legend()
-    ax.grid(alpha=0.25)
-
-    fig.tight_layout()
-    fig.savefig(
-        RESULTADOS_DIR / "cusum_modelo_final.png",
-        dpi=300,
-        bbox_inches="tight"
-    )
-    plt.show()
-    plt.close(fig)
-
-    print(
-        "CUSUM guardado. La gráfica es un diagnóstico exploratorio; "
-        "las bandas no constituyen por sí solas una prueba formal "
-        "de estabilidad de parámetros para SARIMAX."
-    )
-# %% =====================================================================================
-
-# %% PASO 4: PRONÓSTICO DEL SARIMA SELECCIONADO
-
-idx_pron = pd.date_range(
-    start=serie.index[-1],
-    periods=PASOS + 1,
-    freq=FREQ
-)[1:]
-
-# Para el horizonte futuro se supone que las dummies de impulso valen cero.
-exog_fut = pd.DataFrame(
-    0.0,
-    index=idx_pron,
-    columns=exog.columns
-)
-
-# Pronóstico del modelo SARIMA final
-fc = estimacion_final.get_forecast(
-    steps=PASOS,
-    exog=exog_fut
-)
-
-puntual = np.asarray(fc.predicted_mean)
-ic = fc.conf_int(alpha=0.05)
-
-tabla_pron = pd.DataFrame({
-    "Pronóstico": puntual,
-    "IC95 inferior": np.asarray(ic.iloc[:, 0]),
-    "IC95 superior": np.asarray(ic.iloc[:, 1])
-}, index=idx_pron)
-
-print(f"\n=== PRONÓSTICO: {nombre_final} ===")
-print(tabla_pron.round(4).to_string())
-
-tabla_pron.to_csv(
-    RESULTADOS_DIR / "tabla_pronostico.csv"
-)
-
-# Gráfico del pronóstico
-plt.figure(figsize=(11, 5))
-
-plt.plot(
-    serie.iloc[-40:],
-    color="black",
-    lw=1.2,
-    label="Histórico"
-)
-
-plt.plot(
-    idx_pron,
-    puntual,
-    linestyle="--",
-    marker="o",
-    label=f"Pronóstico {nombre_final}"
-)
-
-plt.fill_between(
-    idx_pron,
-    np.asarray(ic.iloc[:, 0]),
-    np.asarray(ic.iloc[:, 1]),
-    alpha=0.25,
-    label="Intervalo de confianza del 95%"
-)
-
-plt.title(
-    f"Pronóstico del PIB — {PAIS}, "
-    f"{PASOS} trimestres"
-)
+plt.figure(figsize=(10, 4))
+plt.plot(e_final.index, S, color="steelblue", lw=1.5, label="OLS-CUSUM")
+plt.axhline(1.358, color="red", ls="--", lw=1, label="±1.358 (5 %)")
+plt.axhline(-1.358, color="red", ls="--", lw=1)
+plt.axhline(0, color="black", lw=0.6, ls=":")
+plt.title(f"OLS-CUSUM de los residuos — {nombre_final}")
 plt.xlabel("Fecha")
-plt.ylabel("Tasa de crecimiento (%)")
-plt.legend()
+plt.legend(fontsize=9)
 plt.grid(alpha=0.3)
 plt.tight_layout()
-
-plt.savefig(
-    RESULTADOS_DIR / "06_pronostico.png",
-    dpi=150
-)
+plt.savefig(RESULTADOS_DIR / "05_cusum.png", dpi=150)
 plt.show()
+
+# Quiebres en la media (opcional). 'ruptures' solo implementa el algoritmo de programación
+# dinámica de mínimos cuadrados de Bai–Perron; NO entrega pruebas sup-F ni inferencia, y supone
+# errores no autocorrelacionados. Úsese como exploración, sobre el tramo pre-COVID.
+if HAY_RUPTURES:
+    y_bp = pre_covid.values
+    n_bp = len(y_bp)
+    modelo_bp = rpt.Dynp(model="l2", min_size=12, jump=1).fit(y_bp)
+    bic_bp = {}
+    for m in range(0, 4):
+        bkps = modelo_bp.predict(n_bkps=m) if m > 0 else [n_bp]
+        rss = sum(np.sum((y_bp[i:j] - y_bp[i:j].mean()) ** 2) for i, j in zip([0] + bkps[:-1], bkps))
+        bic_bp[m] = n_bp * np.log(rss / n_bp) + (m + 1) * np.log(n_bp)
+    m_opt = min(bic_bp, key=bic_bp.get)
+    print("\nQuiebres en la media (pre-COVID, exploratorio): BIC por m =",
+          {int(k): round(float(v), 1) for k, v in bic_bp.items()}, "→ m óptimo =", m_opt)
+    if m_opt > 0:
+        bk = modelo_bp.predict(n_bkps=m_opt)
+        print("  Fechas de quiebre:", [pre_covid.index[b - 1].date() for b in bk[:-1]])
+else:
+    print("\n(ruptures no está instalado: se omite la exploración de quiebres. Es opcional.)")
+
+# %% =====================================================================================
+# PASO 4: PRONÓSTICO
+# ========================================================================================
+# Pronóstico óptimo (esperanza condicional, mínimo ECM):  E_t y_{t+j}
+# Error de pronóstico:  e_t(j) = ψ0 ε_{t+j} + ψ1 ε_{t+j−1} + ... + ψ_{j−1} ε_{t+1},  ψ0 = 1
+# Varianza:             Var[e_t(j)] = σ² (ψ0² + ψ1² + ... + ψ_{j−1}²)
+# IC al 95 % (normal):  E_t y_{t+j} ± 1.96 · sqrt(Var[e_t(j)])
+# Los ψ salen de igualar coeficientes en  φ(L) ψ(L) = θ(L).
+
+idx_pron = pd.date_range(serie.index[-1], periods=PASOS + 1, freq=FREQ)[1:]
+exog_fut = pd.DataFrame(0.0, index=idx_pron, columns=exog.columns)   # no se espera otro COVID
+
+
+def pronosticar(res, pasos, exog_futuro):
+    """Pronóstico puntual, pesos ψ, varianza e intervalos analíticos (fórmulas del curso)."""
+    par = res.params
+    p, _, q = res.model.order
+    phi = np.array([par[f"ar.L{i}"] for i in range(1, p + 1)])
+    theta = np.array([par[f"ma.L{j}"] for j in range(1, q + 1)])
+    psi = arma2ma(np.r_[1.0, -phi], np.r_[1.0, theta], lags=pasos)
+    var_e = par["sigma2"] * np.cumsum(psi ** 2)
+    fc = res.get_forecast(pasos, exog=exog_futuro)
+    puntual = fc.predicted_mean.values
+    assert np.allclose(var_e, fc.var_pred_mean, rtol=1e-4), "ψ-pesos y statsmodels no coinciden"
+    return puntual, psi, var_e
+
+
+def bootstrap_trayectorias(res, residuos, pasos, n_boot, exog_futuro, semilla):
+    """Bootstrap de residuos: se remuestrean los residuos (centrados, SIN los de obs. con dummy) y se
+    propagan por la ecuación ARMA; así el intervalo crece con el horizonte. No exige normalidad,
+    pero tampoco incorpora la incertidumbre de estimación de los parámetros."""
+    rng = np.random.default_rng(semilla)
+    par = res.params
+    p, _, q = res.model.order
+    c = par["intercept"]
+    a = np.array([par[f"ar.L{i}"] for i in range(1, p + 1)])
+    b = np.array([par[f"ma.L{j}"] for j in range(1, q + 1)])
+    cols = list(exog_futuro.columns)
+    beta = par[cols].values
+    u_hist = res.model.endog.ravel() - res.model.exog @ beta    # serie sin el efecto de las dummies
+    e_hist = res.resid.values
+    media_x = exog_futuro.values @ beta
+    pool = residuos.values - residuos.values.mean()
+
+    def una(choques):
+        u = list(u_hist[-p:]) if p else []
+        e = list(e_hist[-q:]) if q else []
+        out = np.empty(pasos)
+        for h in range(pasos):
+            ar_part = np.dot(a, u[::-1][:p]) if p else 0.0
+            ma_part = np.dot(b, e[::-1][:q]) if q else 0.0
+            u_new = c + ar_part + ma_part + choques[h]
+            u.append(u_new)
+            e.append(choques[h])
+            out[h] = u_new + media_x[h]
+        return out
+
+    puntual = una(np.zeros(pasos))
+    sims = np.vstack([una(rng.choice(pool, size=pasos, replace=True)) for _ in range(n_boot)])
+    return puntual, sims
+
+
+puntual, psi, var_e = pronosticar(estimacion_final, PASOS, exog_fut)
+sd_e = np.sqrt(var_e)
+puntual_b, sims = bootstrap_trayectorias(estimacion_final, e_final, PASOS, N_BOOT, exog_fut, SEMILLA)
+assert np.allclose(puntual, puntual_b, atol=1e-6), "La recursión del bootstrap no reproduce el pronóstico"
+
+tabla_pron = pd.DataFrame({
+    "pronóstico": puntual,
+    "ψ_{j-1}": psi,
+    "Var[e_t(j)]": var_e,
+    "IC95 inf (analítico)": puntual - 1.96 * sd_e,
+    "IC95 sup (analítico)": puntual + 1.96 * sd_e,
+    "IC95 inf (bootstrap)": np.percentile(sims, 2.5, axis=0),
+    "IC95 sup (bootstrap)": np.percentile(sims, 97.5, axis=0),
+}, index=idx_pron)
+j_max_conv = 80
+mu_hat = media_incondicional(estimacion_final)
+largo = estimacion_final.get_forecast(
+    j_max_conv, exog=pd.DataFrame(0.0, index=pd.date_range(serie.index[-1], periods=j_max_conv + 1, freq=FREQ)[1:],
+                                  columns=exog.columns)).predicted_mean.values
+TOL_CONV = 0.25
+fuera = np.where(np.abs(largo - mu_hat) >= TOL_CONV)[0]       # horizontes (0-indexados) fuera de la banda
+j_conv = (fuera[-1] + 2) if len(fuera) else 1                 # primer j desde el cual PERMANECE dentro
+print(f"\n=== Pronóstico {PASOS} trimestres — {nombre_final} ===")
+print(tabla_pron.round(3).to_string())
+print(f"\nMedia incondicional μ̂ = {mu_hat:.3f} %; Var[e_t(∞)] → γ0 (varianza incondicional).")
+print(f"Desde j = {j_conv} el pronóstico queda de forma permanente a menos de {TOL_CONV} pp de μ̂ "
+      "(con raíces complejas el pronóstico oscila alrededor de μ̂ antes de estabilizarse).")
+tabla_pron.round(4).to_csv(RESULTADOS_DIR / "tabla_pronostico.csv")
+
+plt.figure(figsize=(11, 5))
+plt.plot(serie.iloc[-40:], color="black", lw=1.2, label="Histórico")
+plt.plot(idx_pron, puntual, color="orange", lw=2, ls="--", marker="o", ms=4, label=f"Pronóstico {nombre_final}")
+plt.fill_between(idx_pron, tabla_pron["IC95 inf (analítico)"], tabla_pron["IC95 sup (analítico)"],
+                 color="orange", alpha=0.25, label="IC 95 % analítico (ψ-pesos)")
+plt.plot(idx_pron, tabla_pron["IC95 inf (bootstrap)"], color="firebrick", lw=1, ls=":", label="IC 95 % bootstrap")
+plt.plot(idx_pron, tabla_pron["IC95 sup (bootstrap)"], color="firebrick", lw=1, ls=":")
+plt.axhline(mu_hat, color="gray", lw=0.8, ls="--", label=f"μ̂ = {mu_hat:.2f} %")
+plt.title(f"Pronóstico — PIB {PAIS}, {PASOS} trimestres desde {serie.index[-1].year} Q{serie.index[-1].quarter}")
+plt.xlabel("Fecha")
+plt.ylabel("Tasa de crecimiento (%)")
+plt.legend(fontsize=9)
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(RESULTADOS_DIR / "06_pronostico.png", dpi=150)
+plt.show()
+
+# %% =====================================================================================
+# ¿ES UN PROBLEMA EL AR(8)?  Comparación directa con el modelo final
+# ========================================================================================
+
+if "AR(8)" in estimaciones and nombre_final != "AR(8)":
+    r8 = estimaciones["AR(8)"]
+    print("\n=== Coeficientes del AR(8) de referencia ===")
+    print(pd.DataFrame({"coef": r8.params, "z": r8.tvalues, "p-valor": r8.pvalues})
+          .loc[[k for k in r8.params.index if k.startswith("ar.L")]].round(3).to_string())
+    p8, _, _ = r8.model.order
+    print(f"AR(8): {len(r8.params)} parámetros estimados; se pierden {p8} obs. iniciales en el diagnóstico;"
+          f" mín|raíz AR| = {min_raices(r8)[0]:.3f}")
+    pr8, _, _ = pronosticar(r8, PASOS, exog_fut)
+    comp = pd.DataFrame({nombre_final: puntual, "AR(8)": pr8, "diferencia": puntual - pr8}, index=idx_pron)
+    print("\n=== Pronósticos: modelo final vs AR(8) ===")
+    print(comp.round(3).to_string())
 
 # %% Sensibilidad: ¿el orden elegido depende de cómo se trate el COVID?
 
@@ -761,7 +635,6 @@ print(f"Muestra          : {serie.index[0].date()} — {serie.index[-1].date()} 
 print(f"Orden integración: d = {d}")
 print(f"Dummies          : {exog.shape[1]} ({', '.join(exog.columns)})")
 print(f"Modelo final     : {nombre_final}  | AIC = {estimacion_final.aic:.1f}  BIC = {estimacion_final.bic:.1f}")
+print(f"Media incondic.  : {mu_hat:.3f} %")
 print(f"Pronóstico j=1..3: {np.round(puntual[:3], 3)}")
 print(f"Resultados en    : {RESULTADOS_DIR}")
-
-# %%
