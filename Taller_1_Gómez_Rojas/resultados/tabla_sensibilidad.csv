@@ -1,0 +1,4 @@
+Tratamiento,Mejor AIC (todos),Mejor BIC (todos),Mejor BIC (válidos)
+Sin tratamiento,AR(8),AR(8),AR(8)
+"2 dummies (2020Q2, 2021Q2; como en Colab)",AR(8),"ARMA(2,2)","ARMA(2,2)"
+Ventana COVID + atípicos (9 dummies),AR(6),"ARMA(2,2)",AR(5)
